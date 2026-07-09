@@ -156,6 +156,7 @@ data:
   {{- end }}
   PHOENIX_DATABASE_ALLOCATED_STORAGE_CAPACITY_GIBIBYTES: {{ .Values.database.allocatedStorageGiB | quote }}
   PHOENIX_DEFAULT_RETENTION_POLICY_DAYS: {{ .Values.database.defaultRetentionPolicyDays | quote }}
+  PHOENIX_DELETE_EMPTY_PROJECTS: {{ .Values.database.deleteEmptyProjects | quote }}
 
   # SMTP configuration
   PHOENIX_SMTP_HOSTNAME: {{ .Values.smtp.hostname | quote }}

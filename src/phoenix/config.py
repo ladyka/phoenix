@@ -777,6 +777,12 @@ ENV_PHOENIX_DEFAULT_RETENTION_POLICY_DAYS = "PHOENIX_DEFAULT_RETENTION_POLICY_DA
 """
 The default retention policy for traces in days.
 """
+ENV_PHOENIX_DELETE_EMPTY_PROJECTS = "PHOENIX_DELETE_EMPTY_PROJECTS"
+"""
+When true, retention sweeps delete projects that have no traces left and whose last
+trace activity (or project creation time if never traced) is older than the policy's
+max_days threshold.
+"""
 
 ENV_PHOENIX_ALLOWED_SANDBOX_PROVIDERS = "PHOENIX_ALLOWED_SANDBOX_PROVIDERS"
 """
@@ -965,6 +971,17 @@ def get_env_default_retention_policy_days() -> int:
     if days < 0:
         raise ValueError("PHOENIX_DEFAULT_RETENTION_POLICY_DAYS must be non-negative")
     return days
+
+
+def get_env_delete_empty_projects() -> bool:
+    """
+    Returns whether the retention sweeper should delete empty projects whose last
+    trace activity exceeds the policy max_days threshold.
+
+    Returns:
+        bool: True when PHOENIX_DELETE_EMPTY_PROJECTS is set to a truthy value.
+    """
+    return _bool_val(ENV_PHOENIX_DELETE_EMPTY_PROJECTS, False)
 
 
 def get_env_tls_config() -> Optional[TLSConfig]:

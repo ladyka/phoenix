@@ -264,6 +264,10 @@ database:
   # traces older than this many days will be automatically removed from the database.
   defaultRetentionPolicyDays: 0
 
+  # -- Delete projects that have no traces left after retention sweeps
+  # (PHOENIX_DELETE_EMPTY_PROJECTS). Requires defaultRetentionPolicyDays > 0.
+  deleteEmptyProjects: false
+
   postgres:
     # -- Name of the PostgreSQL database (PHOENIX_POSTGRES_DB)
     db: "phoenix"

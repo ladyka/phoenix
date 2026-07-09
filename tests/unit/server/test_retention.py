@@ -433,6 +433,276 @@ class TestTraceDataSweeper:
                 )
 
 
+class TestEmptyProjectCleanup:
+    @staticmethod
+    async def _configure_max_days_policy(
+        db: DbSessionFactory,
+        *,
+        project_ids: list[int],
+        max_days: int,
+        use_default_policy: bool,
+    ) -> None:
+        retention_rule = TraceRetentionRule(root=MaxDaysRule(max_days=max_days))
+        hourly_schedule = TraceRetentionCronExpression(root="0 * * * *")
+        async with db() as session:
+            if use_default_policy:
+                policy = await session.get(
+                    models.ProjectTraceRetentionPolicy,
+                    DEFAULT_PROJECT_TRACE_RETENTION_POLICY_ID,
+                )
+                assert policy is not None
+            else:
+                projects = list(
+                    await session.scalars(
+                        sa.select(models.Project).where(models.Project.id.in_(project_ids))
+                    )
+                )
+                policy = models.ProjectTraceRetentionPolicy(
+                    name=token_hex(8),
+                    projects=projects,
+                )
+            policy.rule = retention_rule
+            policy.cron_expression = hourly_schedule
+            await session.merge(policy)
+
+    @pytest.mark.parametrize("use_default_policy", [True, False])
+    async def test_deletes_empty_stale_project_when_enabled(
+        self,
+        use_default_policy: bool,
+        sweeper_trigger: Event,
+        db: DbSessionFactory,
+        asgi_app: ASGIApp,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("PHOENIX_DELETE_EMPTY_PROJECTS", "true")
+        max_days = 7
+
+        async with db() as session:
+            project = models.Project(name=token_hex(8))
+            session.add(project)
+            await session.flush()
+            project_id = project.id
+            now = datetime.now(timezone.utc)
+            session.add(
+                models.Trace(
+                    project_rowid=project_id,
+                    trace_id=token_hex(16),
+                    start_time=now - timedelta(days=max_days + 3),
+                    end_time=now - timedelta(days=max_days + 3) + timedelta(seconds=1),
+                )
+            )
+
+        await self._configure_max_days_policy(
+            db,
+            project_ids=[project_id],
+            max_days=max_days,
+            use_default_policy=use_default_policy,
+        )
+
+        sweeper_trigger.set()
+        await sleep(1.0)
+
+        async with db() as session:
+            assert await session.get(models.Project, project_id) is None
+
+    @pytest.mark.parametrize("use_default_policy", [True, False])
+    async def test_keeps_project_with_recent_traces(
+        self,
+        use_default_policy: bool,
+        sweeper_trigger: Event,
+        db: DbSessionFactory,
+        asgi_app: ASGIApp,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("PHOENIX_DELETE_EMPTY_PROJECTS", "true")
+        max_days = 7
+
+        async with db() as session:
+            project = models.Project(name=token_hex(8))
+            session.add(project)
+            await session.flush()
+            project_id = project.id
+            now = datetime.now(timezone.utc)
+            session.add_all(
+                [
+                    models.Trace(
+                        project_rowid=project_id,
+                        trace_id=token_hex(16),
+                        start_time=now - timedelta(days=max_days + 3),
+                        end_time=now - timedelta(days=max_days + 3) + timedelta(seconds=1),
+                    ),
+                    models.Trace(
+                        project_rowid=project_id,
+                        trace_id=token_hex(16),
+                        start_time=now - timedelta(days=1),
+                        end_time=now - timedelta(days=1) + timedelta(seconds=1),
+                    ),
+                ]
+            )
+
+        await self._configure_max_days_policy(
+            db,
+            project_ids=[project_id],
+            max_days=max_days,
+            use_default_policy=use_default_policy,
+        )
+
+        sweeper_trigger.set()
+        await sleep(1.0)
+
+        async with db() as session:
+            assert await session.get(models.Project, project_id) is not None
+            trace_count = await session.scalar(
+                sa.select(func.count(models.Trace.id)).filter_by(project_rowid=project_id)
+            )
+            assert trace_count == 1
+
+    async def test_does_not_delete_when_flag_disabled(
+        self,
+        sweeper_trigger: Event,
+        db: DbSessionFactory,
+        asgi_app: ASGIApp,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("PHOENIX_DELETE_EMPTY_PROJECTS", "false")
+        max_days = 7
+
+        async with db() as session:
+            project = models.Project(name=token_hex(8))
+            session.add(project)
+            await session.flush()
+            project_id = project.id
+            now = datetime.now(timezone.utc)
+            session.add(
+                models.Trace(
+                    project_rowid=project_id,
+                    trace_id=token_hex(16),
+                    start_time=now - timedelta(days=max_days + 3),
+                    end_time=now - timedelta(days=max_days + 3) + timedelta(seconds=1),
+                )
+            )
+
+        await self._configure_max_days_policy(
+            db,
+            project_ids=[project_id],
+            max_days=max_days,
+            use_default_policy=True,
+        )
+
+        sweeper_trigger.set()
+        await sleep(1.0)
+
+        async with db() as session:
+            assert await session.get(models.Project, project_id) is not None
+            trace_count = await session.scalar(
+                sa.select(func.count(models.Trace.id)).filter_by(project_rowid=project_id)
+            )
+            assert trace_count == 0
+
+    async def test_does_not_delete_protected_projects(
+        self,
+        sweeper_trigger: Event,
+        db: DbSessionFactory,
+        asgi_app: ASGIApp,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from phoenix.config import DEFAULT_PROJECT_NAME, PLAYGROUND_PROJECT_NAME
+
+        monkeypatch.setenv("PHOENIX_DELETE_EMPTY_PROJECTS", "true")
+        max_days = 7
+        now = datetime.now(timezone.utc)
+
+        async with db() as session:
+            default_project = await session.scalar(
+                sa.select(models.Project).where(models.Project.name == DEFAULT_PROJECT_NAME)
+            )
+            if default_project is None:
+                default_project = models.Project(name=DEFAULT_PROJECT_NAME)
+                session.add(default_project)
+                await session.flush()
+
+            playground_project = await session.scalar(
+                sa.select(models.Project).where(models.Project.name == PLAYGROUND_PROJECT_NAME)
+            )
+            if playground_project is None:
+                playground_project = models.Project(name=PLAYGROUND_PROJECT_NAME)
+                session.add(playground_project)
+                await session.flush()
+
+            for project_id in (default_project.id, playground_project.id):
+                session.add(
+                    models.Trace(
+                        project_rowid=project_id,
+                        trace_id=token_hex(16),
+                        start_time=now - timedelta(days=max_days + 3),
+                        end_time=now - timedelta(days=max_days + 3) + timedelta(seconds=1),
+                    )
+                )
+
+        await self._configure_max_days_policy(
+            db,
+            project_ids=[default_project.id, playground_project.id],
+            max_days=max_days,
+            use_default_policy=True,
+        )
+
+        sweeper_trigger.set()
+        await sleep(1.0)
+
+        async with db() as session:
+            assert await session.get(models.Project, default_project.id) is not None
+            assert await session.get(models.Project, playground_project.id) is not None
+
+    async def test_deletes_orphan_sessions_after_trace_retention(
+        self,
+        sweeper_trigger: Event,
+        db: DbSessionFactory,
+        asgi_app: ASGIApp,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("PHOENIX_DELETE_EMPTY_PROJECTS", "false")
+        max_days = 7
+
+        async with db() as session:
+            project = models.Project(name=token_hex(8))
+            session.add(project)
+            await session.flush()
+            project_id = project.id
+            now = datetime.now(timezone.utc)
+            session_obj = models.ProjectSession(
+                session_id=token_hex(16),
+                project_id=project_id,
+                start_time=now - timedelta(days=max_days + 3),
+                end_time=now - timedelta(days=max_days + 3) + timedelta(seconds=1),
+            )
+            session.add(session_obj)
+            await session.flush()
+            session_id = session_obj.id
+            session.add(
+                models.Trace(
+                    project_rowid=project_id,
+                    project_session_rowid=session_id,
+                    trace_id=token_hex(16),
+                    start_time=now - timedelta(days=max_days + 3),
+                    end_time=now - timedelta(days=max_days + 3) + timedelta(seconds=1),
+                )
+            )
+
+        await self._configure_max_days_policy(
+            db,
+            project_ids=[project_id],
+            max_days=max_days,
+            use_default_policy=True,
+        )
+
+        sweeper_trigger.set()
+        await sleep(1.0)
+
+        async with db() as session:
+            assert await session.get(models.ProjectSession, session_id) is None
+            assert await session.get(models.Project, project_id) is not None
+
+
 @pytest.fixture
 async def sweeper_trigger() -> AsyncIterator[Event]:
     """Control when the TraceDataSweeper runs by patching its sleep method.

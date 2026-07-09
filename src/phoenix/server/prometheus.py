@@ -132,6 +132,12 @@ RETENTION_POLICY_EXECUTIONS = Counter(
     labelnames=["status"],
 )
 
+RETENTION_PROJECTS_DELETED = Counter(
+    namespace="phoenix",
+    name="retention_projects_deleted_total",
+    documentation="Total number of empty projects deleted by the retention sweeper",
+)
+
 
 class PrometheusMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
